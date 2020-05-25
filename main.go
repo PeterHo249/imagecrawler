@@ -10,7 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/user"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -18,9 +18,10 @@ import (
 	fb "github.com/huandu/facebook"
 )
 
-var name = flag.String("n", "", "Facebook page name")
+var name = flag.String("n", "", "Page name")
 var numOfWorkersPtr = flag.Int("c", 2, "The number of concurrence workers")
 var isFromFB = flag.Bool("f", true, "get image from FB or IG")
+var outputPath = flag.String("o", "", "Output folder path")
 var m sync.Mutex
 var token string
 var igClient *instagram.Client
@@ -127,7 +128,7 @@ func findIGPhotos(ownerName string, albumName string, userID string, baseDir str
 
 	dir := fmt.Sprintf("%v/%v", baseDir, ownerName)
 	os.MkdirAll(dir, 0755)
-	linkChan := make(chan string)
+	linkChan := make(chan DLData)
 
 	wg := new(sync.WaitGroup)
 	for i := 0; i < 1; i++ {
@@ -150,12 +151,63 @@ func findIGPhotos(ownerName string, albumName string, userID string, baseDir str
 
 		for _, media := range mediaList {
 			totalPhotoNumber = totalPhotoNumber + 1
-			linkChan <- media.Images.StandardResolution.URL
+			dlChan := DLData{}
+			dlChan.ImageID = strconv.Itoa(totalPhotoNumber)
+			dlChan.ImageURL = media.Images.StandardResolution.URL
+			linkChan <- dlChan
 		}
 
 		if len(mediaList) == 0 || next.NextMaxID == "" {
 			break
 		}
+	}
+}
+
+func findPhotos(isFromFB bool, pageName string, baseDir string) {
+	if isFromFB {
+		resUser := runFBGraphAPI("/" + pageName)
+		userRet := FBUser{}
+		parseMapToStruct(resUser, &userRet)
+
+		resAlbums := runFBGraphAPI("/" + pageName + "/albums")
+		albumRet := FBAlbums{}
+		parseMapToStruct(resAlbums, &albumRet)
+
+		maxCount := 30
+
+		for _, v := range albumRet.Data {
+			fmt.Println("Starting download ["+v.Name+"]-"+v.From.Name, " total count: ", v.Count)
+
+			if v.Count > maxCount {
+				currentOffset := 0
+				for {
+					if currentOffset > v.Count {
+						break
+					}
+					findFBPhotoByAlbum("PeterHo", v.Name, v.ID, baseDir, maxCount, currentOffset)
+					currentOffset = currentOffset + maxCount
+				}
+			} else {
+				findFBPhotoByAlbum("PeterHo", v.Name, v.ID, baseDir, v.Count, 0)
+			}
+		}
+	} else {
+		igClient = instagram.NewClient(nil)
+		igClient.ClientID = igClientID
+
+		var userID string
+		searchUsers, _, err := igClient.Users.Search(pageName, nil)
+		if err != nil {
+			log.Fatalln("FB connect error, err=", err.Error())
+		}
+
+		for _, user := range searchUsers {
+			if user.Username == pageName {
+				userID = user.ID
+			}
+		}
+
+		findIGPhotos("PeterHo", pageName, userID, baseDir)
 	}
 }
 
@@ -182,7 +234,6 @@ func runFBGraphAPI(query string) (queryResult interface{}) {
 
 func main() {
 	flag.Parse()
-	var inputPage string
 	if token == "" {
 		log.Fatalln("Set your FB token as environment variables")
 	}
@@ -191,49 +242,14 @@ func main() {
 		log.Fatalln("You need to input -n=Name-or-id")
 	}
 
+	if *outputPath == "" {
+		log.Fatalln("You need to input -o=Name-or-id")
+	}
+
 	selectSource(*isFromFB)
 
-	inputPage = *name
+	pageName := *name
+	baseDir := *outputPath
 
-	usr, _ := user.Current()
-	baseDir := fmt.Sprintf("%v/Pictures/goFBPages", usr.HomeDir)
-
-	resUser := runFBGraphAPI("/" + inputPage)
-	userRet := FBUser{}
-	parseMapToStruct(resUser, &userRet)
-
-	resAlbums := runFBGraphAPI("/" + inputPage + "/albums")
-	albumRet := FBAlbums{}
-	parseMapToStruct(resAlbums, &albumRet)
-
-	maxCount := 30
-
-	igClient = instagram.NewClient(nil)
-	igClient.ClientID = igClientID
-
-	var userID string
-	searchUsers, _, err := igClient.Users.Search(inputUser, nil)
-	for _, user := range searchUsers {
-		if user.Username == inputUser {
-			userID = user.ID
-		}
-	}
-
-	userFolderName := fmt.Sprintf("[%s]%s", userRet.Username, userRet.Name)
-	for _, v := range albumRet.Data {
-		fmt.Println("Starting download ["+v.Name+"]-"+v.From.Name, " total count: ", v.Count)
-
-		if v.Count > maxCount {
-			currentOffset := 0
-			for {
-				if currentOffset > v.Count {
-					break
-				}
-				findFBPhotoByAlbum(userFolderName, v.Name, v.ID, baseDir, maxCount, currentOffset)
-				currentOffset = currentOffset + maxCount
-			}
-		} else {
-			findFBPhotoByAlbum(userFolderName, v.Name, v.ID, baseDir, v.Count, 0)
-		}
-	}
+	findPhotos(*isFromFB, pageName, baseDir)
 }
